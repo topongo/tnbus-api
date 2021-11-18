@@ -76,7 +76,7 @@ class TNBus:
         for s in self.raw["stops"]:
             self.stops.append(self.Stop(s))
             for r in s["routes"]:
-                _r = self.get(self.Route, {By.ID: r["routeId"], By.TYPE: r["type"]})
+                _r = self.get(self.Route, (By.ID, r["routeId"]), (By.TYPE, r["type"]))
                 self.stops[-1].routes.append(_r)
                 _r.stops.add(self.stops[-1])
                 self.stops[-1].areas.add(_r.area)
@@ -88,27 +88,33 @@ class TNBus:
         else:
             self.age = datetime.now()
 
-    def get(self, t_, filters: dict[int, any]):
-        for _b in filters:
+    def get(self, t_, *filters: tuple[int, any], store_override=None):
+        for _b, _ in filters:
             if _b not in t_.SEARCH_ASSOC:
                 raise TypeError(f"Type {t_} doesn't support searches by {By.string(By(), _b)}")
 
-        store = self.__getattribute__(t_.SEARCH_STORE)
+        if store_override:
+            store = store_override
+        else:
+            store = self.__getattribute__(t_.SEARCH_STORE)
 
         out = []
         if store:
             _iter = []
-            for _b, _v in filters.items():
+            for _b, _v in filters:
                 try:
-                    if _v in store[0].__getattribute__(t_.SEARCH_ASSOC[_b]):
-                        pass
-                    _iter.append(True)
+                    # supports for generators
+                    for _s in store:
+                        if _v in _s.__getattribute__(t_.SEARCH_ASSOC[_b]):
+                            pass
+                        _iter.append(True)
+                        break
                 except TypeError:
                     _iter.append(False)
 
             for _s in store:
                 _add = True
-                for (_b, _v), _i in zip(filters.items(), _iter):
+                for (_b, _v), _i in zip(filters, _iter):
                     s_target = _s.__getattribute__(t_.SEARCH_ASSOC[_b])
                     if _i:
                         if _b == By.NAME_MATCH:
@@ -124,7 +130,7 @@ class TNBus:
                 if _add:
                     out.append(_s)
 
-        if By.ID in filters:
+        if By.ID in (_f[0] for _f in filters):
             if len(out) == 1:
                 return out[0]
             elif len(out) == 0:
@@ -135,13 +141,13 @@ class TNBus:
         return out
 
     def get_stop(self, value, by=By.ID):
-        return self.get(self.Stop, {by: value})
+        return self.get(self.Stop, (by, value))
 
     def get_route(self, value, by=By.ID):
-        return self.get(self.Route, {by: value})
+        return self.get(self.Route, (by, value))
 
     def get_area(self, value, by=By.ID):
-        return self.get(self.Area, {by: value})
+        return self.get(self.Area, (by, value))
 
     def _load_trip(self, trip_id: str):
         pass
@@ -379,12 +385,10 @@ class API:
 
 if __name__ == "__main__":
     with open("auth") as f, open("data.json") as d:
-        t = TNBus(API(f.read().strip()), preload=json.load(d))
+        t = TNBus(API(f.read().strip()),) #preload=json.load(d))
 
-    print(t.api.trip_news(t.get(
+    print(t.get(
         TNBus.Route,
-        {
-            By.STOP: t.get(TNBus.Stop, {By.NAME_MATCH: "povo sale"})[0],
-            By.NAME_MATCH: "5"
-        }
-    )[0]))
+        (By.NAME_MATCH, t.get(TNBus.Stop, (By.NAME_MATCH, "povo sale"))[0]),
+        (By.NAME_MATCH, "5")
+    )[0].stops)
