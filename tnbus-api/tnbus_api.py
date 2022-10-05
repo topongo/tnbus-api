@@ -1,35 +1,69 @@
 import json
 import requests
 from unicodedata import normalize as u_normalize, combining as u_combining
-from datetime import datetime
+from datetime import datetime, time, timedelta
+from pytz import timezone
 
 
 def remove_accents(inp):
     return u"".join((c for c in u_normalize("NFKD", inp) if not u_combining(c)))
 
 
+def tz_dt_fromisoformat(string):
+    tz = timezone("utc")
+    return tz.localize(datetime.fromisoformat(string.replace("Z", "")))
+
+
+def tz_t_fromisoformat(string):
+    tz = timezone("utc")
+    return tz.localize(datetime.combine(datetime.today(), time.fromisoformat(string.replace("Z", "")))).time()
+
+
 class By:
     # must refer to an int
-    ID = 0
-    DIRECTION = 7
+    class ID:
+        pass
+
+    class ID_NUM:
+        # specific for Stop, since trips use numeric IDs
+        pass
+
+    class DIRECTION:
+        pass
 
     # must refer to a str
-    NAME = 1
-    NAME_MATCH = 2
+    class NAME:
+        pass
+
+    class NAME_MATCH:
+        pass
 
     # must refer to a str or a int
-    TYPE = 6
+    class TYPE:
+        pass
 
     # must refer to a TNBus.*
-    ROUTE = 3
-    STOP = 4
-    AREA = 5
-    TRIP = 8
+    class ROUTE:
+        pass
+
+    class STOP:
+        pass
+
+    class AREA:
+        pass
+
+    class TRIP:
+        pass
 
     # must refer to a datetime
-    MAX_DATE = 9
-    MIN_DATE = 10
-    STATE = 11
+    class MAX_DATE:
+        pass
+
+    class MIN_DATE:
+        pass
+
+    class STATE:
+        pass
 
     def string(self, _int):
         for _d in self.__dir__():
@@ -37,8 +71,16 @@ class By:
                 return f"By.{_d}"
 
 
+class Cond:
+    class OR:
+        pass
+
+    class AND:
+        pass
+
+
 class TNBus:
-    def __init__(self, _api, preload=None):
+    def __init__(self, _api, preload=None, tz=None):
         self.api = _api
         self.areas = []
         self.news = []
@@ -63,9 +105,9 @@ class TNBus:
         self.areas.append(self.Area({"areaId": 8, "areaDesc": "Funivie", "type": "E"}))
 
         """
-        # all stop dicts returned by API.stops are set to area 0
-        # this is an EXTERNAL bug, not fixable by me.
-        # So a separate call to API.routes is needed, even if API.stops returns stop info as well
+        all stop dicts returned by API.stops are set to area 0
+        this is an EXTERNAL bug, not fixable by me.
+        So a separate call to API.routes is needed, even if API.stops returns stop info as well
         """
 
         for r in self.raw["routes"]:
@@ -88,10 +130,11 @@ class TNBus:
         else:
             self.age = datetime.now()
 
-    def get(self, t_, *filters: tuple[int, any], store_override=None):
-        for _b, _ in filters:
-            if _b not in t_.SEARCH_ASSOC:
-                raise TypeError(f"Type {t_} doesn't support searches by {By.string(By(), _b)}")
+    def get(self, t_, *filters: tuple[int, any], store_override=None, cond_mode=None, override_unique=False):
+        cond_mode = Cond.AND if cond_mode is None else cond_mode
+        for b_, _ in filters:
+            if b_ not in t_.SEARCH_ASSOC:
+                raise TypeError(f"Type {t_} doesn't support searches by {By.string(By(), b_)}")
 
         if store_override:
             store = store_override
@@ -101,11 +144,11 @@ class TNBus:
         out = []
         if store:
             _iter = []
-            for _b, _v in filters:
+            for b_, v_ in filters:
                 try:
                     # supports for generators
                     for _s in store:
-                        if _v in _s.__getattribute__(t_.SEARCH_ASSOC[_b]):
+                        if v_ in _s.__getattribute__(t_.SEARCH_ASSOC[b_]):
                             pass
                         _iter.append(True)
                         break
@@ -113,24 +156,50 @@ class TNBus:
                     _iter.append(False)
 
             for _s in store:
-                _add = True
-                for (_b, _v), _i in zip(filters, _iter):
-                    s_target = _s.__getattribute__(t_.SEARCH_ASSOC[_b])
-                    if _i:
-                        if _b == By.NAME_MATCH:
-                            if remove_accents(_v.lower()) not in \
+                if cond_mode == Cond.AND:
+                    add_ = True
+                elif cond_mode == Cond.OR:
+                    add_ = False
+                else:
+                    raise TypeError(cond_mode)
+                for (b_, v_), i_ in zip(filters, _iter):
+                    s_target = _s.__getattribute__(t_.SEARCH_ASSOC[b_])
+                    if i_:
+                        if b_ == By.NAME_MATCH:
+                            if remove_accents(v_.lower()) not in \
                                     remove_accents(s_target.lower()):
-                                _add = False
+                                if cond_mode == Cond.AND:
+                                    add_ = False
+                            else:
+                                if cond_mode == Cond.OR:
+                                    add_ = True
                         else:
-                            if _v not in s_target:
-                                _add = False
+                            if isinstance(v_, str):
+                                v_ = remove_accents(v_).lower()
+                                s_target = remove_accents(s_target).lower()
+                            if v_ not in s_target:
+                                if cond_mode == Cond.AND:
+                                    add_ = False
+                            else:
+                                if cond_mode == Cond.OR:
+                                    add_ = True
                     else:
-                        if _v != s_target:
-                            _add = False
-                if _add:
-                    out.append(_s)
+                        if v_ != s_target:
+                            if cond_mode == Cond.AND:
+                                add_ = False
+                        else:
+                            if cond_mode == Cond.OR:
+                                add_ = True
 
-        if By.ID in (_f[0] for _f in filters):
+                    if (cond_mode == Cond.OR and add_ is True) or (cond_mode == Cond.AND and add_ is False):
+                        break
+
+                if add_:
+                    out.append(_s)
+                    if not override_unique and By.ID in (_f[0] for _f in filters):
+                        break
+
+        if not override_unique and By.ID in (_f[0] for _f in filters):
             if len(out) == 1:
                 return out[0]
             elif len(out) == 0:
@@ -149,8 +218,30 @@ class TNBus:
     def get_area(self, value, by=By.ID):
         return self.get(self.Area, (by, value))
 
-    def _load_trip(self, trip_id: str):
-        pass
+    def load_trips(self, search, since, limit):
+        if not isinstance(search, (TNBus.Stop, TNBus.Route)):
+            raise TypeError(search)
+        routes_ = {}
+        out = []
+        for i in self.api.trips_new(search, since, limit):
+            if i["routeId"] in routes_:
+                r = routes_[i["routeId"]]
+            else:
+                r = self.get(TNBus.Route, (By.ID, i["routeId"]))
+                routes_[r.id] = r
+            out.append(TNBus.Trip(i, r))
+        return out
+
+    def load_best_trip(self, search, since):
+        res = self.load_trips(search=search, since=since, limit=1)
+        best = None
+        for i in res:
+            if i.best:
+                best = i
+                break
+        if not best:
+            raise TypeError(res)
+        return best
 
     def dump(self, f_hand):
         self.raw["age"] = self.age.timestamp()
@@ -232,6 +323,9 @@ class TNBus:
 
             self.raw = data
 
+        def load_trips(self, since=datetime.now(), limit=1):
+            return t.load_trips(self, since, limit)
+
         def __str__(self):
             return f"Route(id={self.id},code=\"{self.short_name}\",name=\"{self.long_name}\")"
 
@@ -241,6 +335,7 @@ class TNBus:
     class Stop:
         SEARCH_ASSOC = {
             By.ID: "id",
+            By.ID_NUM: "id_numeric",
             By.NAME: "name",
             By.NAME_MATCH: "name",
             By.ROUTE: "routes",
@@ -256,7 +351,7 @@ class TNBus:
             self.areas = set()
             self.id = data["stopCode"]
             self.desc = data["stopDesc"]
-            # id_numeric is UNRELAIABLE!
+            # id_numeric is UNRELIABLE!
             self.id_numeric = data["stopId"]
             self.lat = data["stopLat"]
             self.level = data["stopLevel"]
@@ -267,10 +362,18 @@ class TNBus:
             self.type = data["type"]
             self.wheelchair_boarding = data["wheelchairBoarding"]
 
-            self.trips = []
-            self.trips_load = datetime.fromtimestamp(0)
-
             self.raw = data
+
+        def get_trip_stop(self, trip):
+            if not isinstance(trip, TNBus.Trip):
+                raise TypeError(trip)
+
+            for i_ in trip.times:
+                if i_.stop == self:
+                    return i_
+
+        def load_trips(self, since=datetime.now(), limit=1):
+            return t.load_trips(self, since, limit)
 
         def __str__(self):
             return f"Stop(id={self.id},n_id={self.id_numeric},name=\"{self.name}\")"
@@ -279,8 +382,24 @@ class TNBus:
             return self.__str__()
 
     class TripStopTime:
-        def __init__(self, data):
-            pass
+        def __init__(self, data, trip):
+            self.arrival = tz_t_fromisoformat(data["arrivalTime"])
+            self.departureTime = tz_t_fromisoformat(data["departureTime"])
+            self.stop_id = data["stopId"]
+            self.trip = trip
+            self.type = data["type"]
+            stop_res = t.get(TNBus.Stop, (By.ID_NUM, self.stop_id), (By.TYPE, self.type))
+            if len(stop_res) > 1:
+                raise TypeError(stop_res)
+            self.stop = stop_res[0]
+
+            self.raw = data
+
+        def __str__(self):
+            return f"TripStopTime(arrival={self.arrival}, stop={self.stop})"
+
+        def __repr__(self):
+            return str(self)
 
     class Trip:
         SEARCH_ASSOC = {
@@ -300,24 +419,36 @@ class TNBus:
         ARRIVED = 2
 
         def __init__(self, data, route):
-            # if not isinstance(route, TNBus.Route):
-            #    raise TypeError(f"\"route\" argument must be of type TNBus.Route, {type(route).__str__} given.")
+            if not isinstance(route, TNBus.Route):
+                raise TypeError(f"\"route\" argument must be of type TNBus.Route, {type(route).__str__} given.")
             self.id = data["tripId"]
             self.cable_way = data["cableway"]
             self.best = data["corsaPiuVicinaADataRiferimento"]
             self.delay = data["delay"]
             self.direction = data["directionId"]
             self.signal = data["indiceCorsaInLista"]
-            self.last_sync = data["lastEventRecivedAt"]
+            self.last_sync = tz_dt_fromisoformat(data["lastEventRecivedAt"][:-1]) if data["lastEventRecivedAt"] else None
             self.last_sequence_detection = data["lastSequenceDetection"]
             self.bus = TNBus.Bus(data["matricolaBus"])
-            self.actual_arrive_time = datetime.fromtimestamp(data["oraArrivoEffettivaAFermataSelezionata"])
-            self.scheduled_arrive_time = datetime.fromtimestamp(data["oraArrivoProgrammataAFermataSelezionata"])
+            try:
+                self.actual_arrive_time = tz_dt_fromisoformat(data["oraArrivoEffettivaAFermataSelezionata"])
+            except TypeError:
+                self.actual_arrive_time = None
+            try:
+                self.scheduled_arrive_time = tz_dt_fromisoformat(data["oraArrivoProgrammataAFermataSelezionata"])
+            except TypeError:
+                self.scheduled_arrive_time = None
             self.route = route
-            self.last = None if data["stopLast"] == 0 else route.get(data["stopLast"])
-            self.next = data["stopNext"]
-            self.times = data["stopTimes"]
+            self.times = [TNBus.TripStopTime(i, self) for i in data["stopTimes"]]
+            self.last = None
+            self.next = None
+            for i in self.times:
+                if i.stop_id == data["stopLast"]:
+                    self.last = i.stop
+                if i.stop_id == data["stopNext"]:
+                    self.next = i.stop
             self.totale_corse_in_lista = data["totaleCorseInLista"]
+            self.start = self.times[0].departureTime
 
             # TODO: finish compiling this case
             if data["tripFlag"] == "TRIP_FLAG__MID":
@@ -329,9 +460,13 @@ class TNBus:
             self.trip_headsign = data["tripHeadsign"]
             self.type = data["type"]
             self.wheelchair_accessible = data["wheelchairAccessible"]
+            self.raw = data
 
-        # def __str__(self):
-        #    return f"Route \"{self.short_name}\" - {self.long_name}"
+        def __str__(self):
+            return f"Trip(id={self.id}, route={self.route}, start={self.start})"
+
+        def __repr__(self):
+            return str(self)
 
     class Bus:
         def __init__(self, _id):
@@ -365,14 +500,15 @@ class API:
     def areas(self):
         return json.loads(self.query("areas"))
 
-    def trip(self, trip: str):
-        return json.loads(self.query(f"trips/{trip}"))
+    def trip(self, trip_id: str, ro=None):
+        res = json.loads(self.query(f"trips/{trip_id}"))
+        return TNBus.Trip(res, ro)
 
     def trips_new(self, search: (TNBus.Stop, TNBus.Route), time=None, limit=30):
         args = {
             "limit": limit,
             "type": search.type,
-            "refDateTime": time.isoformat() if isinstance(time, datetime) else None
+            "refDateTime": time.utcnow().isoformat() if isinstance(time, datetime) else None
         }
         if isinstance(search, TNBus.Stop):
             args["stopId"] = search.id_numeric
