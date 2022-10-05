@@ -3,6 +3,8 @@ import requests
 from unicodedata import normalize as u_normalize, combining as u_combining
 from datetime import datetime, time, timedelta
 from pytz import timezone
+from datetime import datetime, timedelta
+from geopy.distance import geodesic
 
 
 def remove_accents(inp):
@@ -36,6 +38,9 @@ class By:
         pass
 
     class NAME_MATCH:
+        pass
+
+    class CODE:
         pass
 
     # must refer to a str or a int
@@ -80,12 +85,14 @@ class Cond:
 
 
 class TNBus:
-    def __init__(self, _api, preload=None, tz=None):
+    def __init__(self, _api, preload=None, tz=None, initial_location=(46.074149, 11.121589)):
         self.api = _api
         self.areas = []
         self.news = []
         self.routes = []
         self.stops = []
+        self.trips = []
+        self.location = initial_location
 
         if not preload:
             self.raw = {
@@ -116,7 +123,7 @@ class TNBus:
                 self.news += self.routes[-1].news
 
         for s in self.raw["stops"]:
-            self.stops.append(self.Stop(s))
+            self.stops.append(self.Stop(s, self.location))
             for r in s["routes"]:
                 _r = self.get(self.Route, (By.ID, r["routeId"]), (By.TYPE, r["type"]))
                 self.stops[-1].routes.append(_r)
@@ -124,6 +131,9 @@ class TNBus:
                 self.stops[-1].areas.add(_r.area)
                 if self.stops[-1].routes[-1] is None:
                     raise
+
+        # self._reload_distances()
+        # self._sort_by_distance()
 
         if preload:
             self.age = datetime.fromtimestamp(self.raw["age"])
@@ -208,6 +218,33 @@ class TNBus:
                 raise Exception(out)
 
         return out
+
+    def _reload_distances(self):
+        # n = datetime.now()
+        # print(f"start distances reloading {n}")
+        for _i in self.stops:
+            _i.reload_distance(self.location)
+        # print(f"end distances reloading {datetime.now()} ({(datetime.now()-n).total_seconds()})")
+
+    def _sort_by_distance(self):
+        # n = datetime.now()
+        # print(f"start distances sorting {n}")
+        self.stops.sort(key=lambda l: l.distance)
+        # print(f"end distances sorting {datetime.now()} ({(datetime.now()-n).total_seconds()})")
+
+    def nearest_stops(self, num=10, location=None):
+        if location:
+            self.update_location(location)
+        for _s, _ in zip(self.stops, range(num)):
+            yield _s
+
+    def nearest_stop(self):
+        return self.stops[0]
+
+    def update_location(self, location: tuple[float, float]):
+        self.location = location
+        self._reload_distances()
+        self._sort_by_distance()
 
     def get_stop(self, value, by=By.ID):
         return self.get(self.Stop, (by, value))
@@ -335,7 +372,6 @@ class TNBus:
     class Stop:
         SEARCH_ASSOC = {
             By.ID: "id",
-            By.ID_NUM: "id_numeric",
             By.NAME: "name",
             By.NAME_MATCH: "name",
             By.ROUTE: "routes",
@@ -346,23 +382,27 @@ class TNBus:
         SEARCH_STORE = "stops"
         SEARCH_TRIPS_UPDATED = "trips_load"
 
-        def __init__(self, data):
+        def __init__(self, data, location):
             self.routes = []
             self.areas = set()
             self.id = data["stopCode"]
             self.desc = data["stopDesc"]
             # id_numeric is UNRELIABLE!
             self.id_numeric = data["stopId"]
-            self.lat = data["stopLat"]
             self.level = data["stopLevel"]
-            self.lon = data["stopLon"]
             self.name = data["stopName"]
             self.street = data["street"]
             self.town = data["town"]
             self.type = data["type"]
             self.wheelchair_boarding = data["wheelchairBoarding"]
 
+            self.location = (data["stopLat"], data["stopLon"])
+            self.distance = geodesic(self.location, location).kilometers
+
             self.raw = data
+
+        def reload_distance(self, location):
+            self.distance = geodesic(self.location, location).kilometers
 
         def get_trip_stop(self, trip):
             if not isinstance(trip, TNBus.Trip):
@@ -520,11 +560,49 @@ class API:
 
 
 if __name__ == "__main__":
-    with open("auth") as f, open("data.json") as d:
-        t = TNBus(API(f.read().strip()),) #preload=json.load(d))
+    with open("auth") as f, open("data.json", "r") as d:
+        t = TNBus(API(f.read().strip())) #preload=json.load(d))
 
-    print(t.get(
+    all_from_piazza_dante = t.get(
         TNBus.Route,
-        (By.NAME_MATCH, t.get(TNBus.Stop, (By.NAME_MATCH, "povo sale"))[0]),
-        (By.NAME_MATCH, "5")
-    )[0].stops)
+        (By.NAME_MATCH, "piazza dante"),
+    )
+    # all_from_piazza_dante = [
+    #     Route(id=400, code="5", name="Piazza Dante P.Fiera Povo Oltrecastello"),
+    #     Route(id=402, code="7", name="Canova Melta Piazza Dante Gocciadoro"),
+    #     Route(id=404, code="8", name="Centochiavi Piazza Dante Mattarello"),
+    #     Route(id=425, code="11", name="Piazza Dante Via Brennero Gardolo Spini"),
+    #     Route(id=478, code="15", name="Piazza Dante Interporto Spini Di Gardolo"),
+    #     Route(id=543, code="17", name="Piazza Dante Via Bolzano Lamar Lavis")]
+    # ]
+
+    all_from_piazza_dante_and_povo = t.get(
+        TNBus.Route,
+        (By.NAME_MATCH, "piazza dante"),
+        (By.NAME_MATCH, "povo")
+    )
+    # all_from_piazza_dante_and_povo = [Route(id=400, code="5", name="Piazza Dante P.Fiera Povo Oltrecastello")]
+
+    # update location (location of povo-2)
+    t.update_location((46.067335, 11.150375))
+
+    # 10 nearest stops to povo-2
+    for s in t.nearest_stops():
+        print(f"{s}\t({s.distance*1000} m)")
+
+    # Stop(id=25055x,n_id=2833,name="Povo Polo Scientifico Ovest")	(1.6476881296745567 m)
+    # Stop(id=25055z,n_id=2683,name="Povo Polo Scientifico Est")	(50.29170985610265 m)
+    # Stop(id=25050-,n_id=2682,name="Povo Sommarive")	(194.37024374373823 m)
+    # Stop(id=25045z,n_id=149,name="Povo Valoni")	(356.1446767245698 m)
+    # Stop(id=25045x,n_id=150,name="Povo Valoni")	(359.6316843179319 m)
+    # Stop(id=25030x,n_id=187,name="Povo Piazza Manci")	(360.8088787149164 m)
+    # Stop(id=25030z,n_id=186,name="Povo Piazza Manci")	(369.59753214659287 m)
+    # Stop(id=25025z,n_id=2490,name="Povo Pantè")	(371.8276192891713 m)
+    # Stop(id=25010z,n_id=183,name="Povo Centro Civico")	(374.58365978618946 m)
+    # Stop(id=25025x,n_id=2820,name="Povo Pantè")	(376.8569417384571 m)
+
+    # getting the nearest stop to povo-2
+    nearest_stop = t.nearest_stop()
+
+    # print(t._fetch_trips(t.get_stop(nearest_stop.id), datetime.now().replace(month=11, day=19, hour=7).isoformat(), num=1))
+
