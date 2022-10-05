@@ -266,7 +266,7 @@ class TNBus:
             else:
                 r = self.get(TNBus.Route, (By.ID, i["routeId"]))
                 routes_[r.id] = r
-            out.append(TNBus.Trip(i, r))
+            out.append(TNBus.Trip(self, i, r))
         return out
 
     def load_best_trip(self, search, since):
@@ -360,7 +360,7 @@ class TNBus:
 
             self.raw = data
 
-        def load_trips(self, since=datetime.now(), limit=1):
+        def load_trips(self, t, since=datetime.now(), limit=1):
             return t.load_trips(self, since, limit)
 
         def __str__(self):
@@ -372,6 +372,7 @@ class TNBus:
     class Stop:
         SEARCH_ASSOC = {
             By.ID: "id",
+            By.ID_NUM: "id_numeric",
             By.NAME: "name",
             By.NAME_MATCH: "name",
             By.ROUTE: "routes",
@@ -412,7 +413,7 @@ class TNBus:
                 if i_.stop == self:
                     return i_
 
-        def load_trips(self, since=datetime.now(), limit=1):
+        def load_trips(self, t, since=datetime.now(), limit=1):
             return t.load_trips(self, since, limit)
 
         def __str__(self):
@@ -422,7 +423,7 @@ class TNBus:
             return self.__str__()
 
     class TripStopTime:
-        def __init__(self, data, trip):
+        def __init__(self, t, data, trip):
             self.arrival = tz_t_fromisoformat(data["arrivalTime"])
             self.departureTime = tz_t_fromisoformat(data["departureTime"])
             self.stop_id = data["stopId"]
@@ -458,7 +459,7 @@ class TNBus:
         DEPARTED = 1
         ARRIVED = 2
 
-        def __init__(self, data, route):
+        def __init__(self, t, data, route):
             if not isinstance(route, TNBus.Route):
                 raise TypeError(f"\"route\" argument must be of type TNBus.Route, {type(route).__str__} given.")
             self.id = data["tripId"]
@@ -479,7 +480,7 @@ class TNBus:
             except TypeError:
                 self.scheduled_arrive_time = None
             self.route = route
-            self.times = [TNBus.TripStopTime(i, self) for i in data["stopTimes"]]
+            self.times = [TNBus.TripStopTime(t, i, self) for i in data["stopTimes"]]
             self.last = None
             self.next = None
             for i in self.times:
@@ -540,9 +541,9 @@ class API:
     def areas(self):
         return json.loads(self.query("areas"))
 
-    def trip(self, trip_id: str, ro=None):
+    def trip(self, t, trip_id: str, ro=None):
         res = json.loads(self.query(f"trips/{trip_id}"))
-        return TNBus.Trip(res, ro)
+        return TNBus.Trip(t, res, ro)
 
     def trips_new(self, search: (TNBus.Stop, TNBus.Route), time=None, limit=30):
         args = {
@@ -560,7 +561,7 @@ class API:
 
 
 if __name__ == "__main__":
-    with open("auth") as f, open("data.json", "r") as d:
+    with open("auth") as f, open("../../data.json", "r") as d:
         t = TNBus(API(f.read().strip())) #preload=json.load(d))
 
     all_from_piazza_dante = t.get(
